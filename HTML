@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>スライドエディタ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .slide-element-container {
+            position: absolute;
+            cursor: move;
+            user-select: none;
+            transition: all 0.2s ease-out;
+        }
+
+        .slide-element-container:hover {
+            outline: 2px solid rgba(59, 130, 246, 0.5);
+        }
+
+        .slide-element-container.active {
+            outline: 2px solid #3b82f6;
+            z-index: 10;
+        }
+
+        [contenteditable]:focus {
+            outline: none;
+        }
+
+        /* サイズ変更ハンドル (はしっこを大きくしたり小さくするマーク) */
+        .resize-handle {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #3b82f6;
+            border: 1px solid white;
+            border-radius: 50%;
+            display: none;
+        }
+
+        .slide-element-container.active .resize-handle {
+            display: block;
+        }
+
+        .resize-handle.top-left { top: -6px; left: -6px; cursor: nwse-resize; }
+        .resize-handle.top-center { top: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+        .resize-handle.top-right { top: -6px; right: -6px; cursor: nesw-resize; }
+        .resize-handle.middle-left { top: 50%; left: -6px; transform: translateY(-50%); cursor: ew-resize; }
+        .resize-handle.middle-right { top: 50%; right: -6px; transform: translateY(-50%); cursor: ew-resize; }
+        .resize-handle.bottom-left { bottom: -6px; left: -6px; cursor: nesw-resize; }
+        .resize-handle.bottom-center { bottom: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+        .resize-handle.bottom-right { bottom: -6px; right: -6px; cursor: nwse-resize; }
+
+        /* アニメーション (スライドが動くしかけ) */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes slideInLeft {
+            from { transform: translateX(-100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes scaleIn {
+            from { transform: scale(0.5); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+
+        .animated {
+            animation-duration: 0.5s;
+            animation-fill-mode: both;
+        }
+
+        .animated.fadeIn {
+            animation-name: fadeIn;
+        }
+        .animated.slideInLeft {
+            animation-name: slideInLeft;
+        }
+        .animated.scaleIn {
+            animation-name: scaleIn;
+        }
+
+        /* アニメーションの初期状態を非表示にする */
+        .initial-animation-state {
+            opacity: 0;
+        }
+        
+        /* スライド一覧のサムネイル用スタイル */
+        .thumbnail-container {
+            position: relative;
+            aspect-ratio: 16 / 9;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+        }
+        
+        .thumbnail-container:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 6px 10px rgba(0, 0, 0, 0.15);
+        }
+
+        .thumbnail-container.active-thumbnail {
+            outline: 4px solid #3b82f6;
+            transform: scale(1.05);
+        }
+    </style>
+    <script>
+        // ここにスライドのデータをいれておくよ
+        let slides = [
+            { elements: [{ id: crypto.randomUUID(), type: 'text', content: 'スライドを作ろう！', styles: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '3rem', fontWeight: 'bold' }, animation: null }] }
+        ];
+        let currentSlideIndex = 0;
+        let activeElementId = null;
+        let isDragging = false;
+        let dragOffsetX = 0, dragOffsetY = 0;
+        let isResizing = false;
+        let resizeHandleType = '';
+        let resizeStartX = 0, resizeStartY = 0;
+        let resizeStartWidth = 0, resizeStartHeight = 0, resizeStartLeft = 0, resizeStartTop = 0;
+        let resizeStartFontSize = 0;
+        let isPresentationMode = false;
+
+        // ファイルをBase64に変換します (むずかしいけど、写真を読み込むために必要だよ)
+        function convertFileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (error) => reject(error);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // スライドの絵や文字を画面にうつします
+        function renderSlide(containerId) {
+            const slideContainer = document.getElementById(containerId);
+            slideContainer.innerHTML = '';
+            
+            if (currentSlideIndex >= 0 && currentSlideIndex < slides.length) {
+                const currentSlide = slides[currentSlideIndex];
+                
+                currentSlide.elements.forEach((element, index) => {
+                    const elementDiv = document.createElement('div');
+                    elementDiv.id = element.id;
+                    elementDiv.className = `slide-element-container ${activeElementId === element.id && !isPresentationMode ? 'active' : ''} ${isPresentationMode && element.animation ? 'initial-animation-state' : ''}`;
+                    
+                    const styleStr = Object.entries(element.styles).map(([key, value]) => `${key}: ${value}`).join(';');
+                    elementDiv.style.cssText = styleStr;
+
+                    let innerHTML = '';
+                    if (!isPresentationMode && element.animation) {
+                        innerHTML += `
+                            <div class="animation-label absolute top-1 left-1 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded-full pointer-events-none z-20">
+                                ${element.animation}
+                            </div>
+                        `;
+                    }
+
+                    if (element.type === 'text') {
+                        innerHTML += `<div contenteditable="${!isPresentationMode}" class="outline-none w-full h-full p-2" data-id="${element.id}" style="color: ${element.styles.color || 'black'}; font-weight: ${element.styles.fontWeight || 'normal'}; font-size: ${element.styles.fontSize};">${element.content}</div>`;
+                    } else if (element.type === 'image') {
+                        innerHTML += `<img src="${element.src}" class="w-full h-full object-contain" />`;
+                    } else if (element.type === 'video') {
+                        innerHTML += `<video src="${element.src}" controls class="w-full h-full object-contain"></video>`;
+                    }
+
+                    if (!isPresentationMode) {
+                        innerHTML += `
+                            <div class="resize-handle top-left"></div>
+                            <div class="resize-handle top-center"></div>
+                            <div class="resize-handle top-right"></div>
+                            <div class="resize-handle middle-left"></div>
+                            <div class="resize-handle middle-right"></div>
+                            <div class="resize-handle bottom-left"></div>
+                            <div class="resize-handle bottom-center"></div>
+                            <div class="resize-handle bottom-right"></div>
+                        `;
+                    }
+                    elementDiv.innerHTML = innerHTML;
+                    slideContainer.appendChild(elementDiv);
+
+                    // アニメーションを適用します
+                    if (isPresentationMode && element.animation) {
+                        setTimeout(() => {
+                            elementDiv.classList.remove('initial-animation-state');
+                            elementDiv.classList.add('animated', element.animation);
+                        }, index * 200); // 200ms delay for each element
+                    }
+                });
+                document.getElementById('slide-count').innerText = `${currentSlideIndex + 1} / ${slides.length}`;
+            } else {
+                slideContainer.innerHTML = `<div class="p-8 h-full flex flex-col justify-center items-center text-gray-500">スライドがありません。新しいスライドを作りましょう。</div>`;
+                document.getElementById('slide-count').innerText = `0 / 0`;
+            }
+            
+            if (!isPresentationMode) {
+                setupInteraction();
+            }
+            renderThumbnails();
+        }
+        
+        // スライドのサムネイルを表示する
+        function renderThumbnails() {
+            const thumbnailContainer = document.getElementById('slide-list-thumbnails');
+            thumbnailContainer.innerHTML = '';
+            slides.forEach((slide, index) => {
+                const thumbnailDiv = document.createElement('div');
+                thumbnailDiv.className = `thumbnail-container cursor-pointer relative p-1 transition-all ${index === currentSlideIndex ? 'active-thumbnail' : ''}`;
+                thumbnailDiv.dataset.index = index;
+
+                // スライド番号を追加
+                const slideNumber = document.createElement('div');
+                slideNumber.className = 'absolute top-2 left-2 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded-full z-10';
+                slideNumber.innerText = `${index + 1}`;
+                thumbnailDiv.appendChild(slideNumber);
+                
+                const slideContent = document.createElement('div');
+                slideContent.className = 'w-full h-full relative transform scale-[0.25] origin-top-left pointer-events-none';
+                slideContent.style.width = '400%';
+                slideContent.style.height = '400%';
+                
+                slide.elements.forEach(element => {
+                    const elementDiv = document.createElement('div');
+                    elementDiv.className = 'slide-element-container pointer-events-none';
+                    const styleStr = Object.entries(element.styles).map(([key, value]) => `${key}: ${value}`).join(';');
+                    elementDiv.style.cssText = styleStr;
+                    
+                    let innerHTML = '';
+                    if (element.type === 'text') {
+                        // サムネイルではfont-sizeを小さくして表示する
+                        const thumbnailFontSize = parseFloat(element.styles.fontSize) / 4 + 'rem';
+                        innerHTML += `<div class="p-1" style="color: ${element.styles.color || 'black'}; font-weight: ${element.styles.fontWeight || 'normal'}; font-size: ${thumbnailFontSize};">${element.content}</div>`;
+                    } else if (element.type === 'image') {
+                        innerHTML += `<img src="${element.src}" class="w-full h-full object-contain" />`;
+                    } else if (element.type === 'video') {
+                        innerHTML += `<video src="${element.src}" class="w-full h-full object-contain"></video>`;
+                    }
+                    elementDiv.innerHTML = innerHTML;
+                    slideContent.appendChild(elementDiv);
+                });
+                
+                thumbnailDiv.appendChild(slideContent);
+                thumbnailContainer.appendChild(thumbnailDiv);
+            });
+
+            // サムネイルクリックでスライドを切り替える
+            const thumbnails = document.querySelectorAll('.thumbnail-container');
+            thumbnails.forEach(thumbnail => {
+                thumbnail.addEventListener('click', () => {
+                    const newIndex = parseInt(thumbnail.dataset.index, 10);
+                    if (newIndex !== currentSlideIndex) {
+                        currentSlideIndex = newIndex;
+                        renderSlide('slide-content');
+                    }
+                    toggleSlideListView(false); // スライド一覧を閉じる
+                });
+            });
+        }
+
+        // 今えらんでいるものを決める
+        function setActiveElement(id) {
+            const allElements = document.querySelectorAll('.slide-element-container');
+            allElements.forEach(el => el.classList.remove('active'));
+            activeElementId = id;
+            if (id) {
+                const activeEl = document.getElementById(id);
+                if (activeEl) {
+                    activeEl.classList.add('active');
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === id);
+                    const animationSelect = document.getElementById('animation-select');
+                    animationSelect.value = element.animation || 'none';
+                }
+            }
+        }
+        
+        // ドラッグしたり、サイズを変えたりする準備をする
+        function setupInteraction() {
+            const slideContainer = document.getElementById('slide-content');
+            
+            slideContainer.addEventListener('mousedown', (e) => {
+                if (isPresentationMode) return;
+                const resizeHandle = e.target.closest('.resize-handle');
+                const elementContainer = e.target.closest('.slide-element-container');
+
+                if (resizeHandle) {
+                    isResizing = true;
+                    setActiveElement(elementContainer.id);
+                    resizeHandleType = Array.from(resizeHandle.classList).find(cls => cls.startsWith('top-') || cls.startsWith('middle-') || cls.startsWith('bottom-'));
+                    resizeStartX = e.clientX;
+                    resizeStartY = e.clientY;
+                    const rect = elementContainer.getBoundingClientRect();
+                    resizeStartWidth = rect.width;
+                    resizeStartHeight = rect.height;
+                    resizeStartLeft = rect.left;
+                    resizeStartTop = rect.top;
+                    const elementData = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (elementData && elementData.type === 'text') {
+                        const contentEl = elementContainer.querySelector('[contenteditable]');
+                        resizeStartFontSize = parseFloat(window.getComputedStyle(contentEl).fontSize);
+                    }
+                    e.preventDefault();
+                } else if (elementContainer) {
+                    isDragging = true;
+                    setActiveElement(elementContainer.id);
+                    
+                    const rect = elementContainer.getBoundingClientRect();
+                    dragOffsetX = e.clientX - rect.left;
+                    dragOffsetY = e.clientY - rect.top;
+                } else {
+                    isDragging = false;
+                    isResizing = false;
+                    setActiveElement(null);
+                }
+            });
+
+            slideContainer.addEventListener('mousemove', (e) => {
+                if (isResizing && activeElementId) {
+                    const elementContainer = document.getElementById(activeElementId);
+                    if (!elementContainer) return;
+
+                    const deltaX = e.clientX - resizeStartX;
+                    const deltaY = e.clientY - resizeStartY;
+                    
+                    let newWidth = resizeStartWidth, newHeight = resizeStartHeight, newLeft = resizeStartLeft, newTop = resizeStartTop;
+
+                    switch(resizeHandleType) {
+                        case 'top-left':
+                            newWidth = resizeStartWidth - deltaX;
+                            newHeight = resizeStartHeight - deltaY;
+                            newLeft = resizeStartLeft + deltaX;
+                            newTop = resizeStartTop + deltaY;
+                            break;
+                        case 'top-center':
+                            newHeight = resizeStartHeight - deltaY;
+                            newTop = resizeStartTop + deltaY;
+                            break;
+                        case 'top-right':
+                            newWidth = resizeStartWidth + deltaX;
+                            newHeight = resizeStartHeight - deltaY;
+                            newTop = resizeStartTop + deltaY;
+                            break;
+                        case 'middle-left':
+                            newWidth = resizeStartWidth - deltaX;
+                            newLeft = resizeStartLeft + deltaX;
+                            break;
+                        case 'middle-right':
+                            newWidth = resizeStartWidth + deltaX;
+                            break;
+                        case 'bottom-left':
+                            newWidth = resizeStartWidth - deltaX;
+                            newHeight = resizeStartHeight + deltaY;
+                            newLeft = resizeStartLeft + deltaX;
+                            break;
+                        case 'bottom-center':
+                            newHeight = resizeStartHeight + deltaY;
+                            break;
+                        case 'bottom-right':
+                            newWidth = resizeStartWidth + deltaX;
+                            newHeight = resizeStartHeight + deltaY;
+                            break;
+                    }
+                    
+                    if (newWidth > 20 && newHeight > 20) {
+                        elementContainer.style.width = `${newWidth}px`;
+                        elementContainer.style.height = `${newHeight}px`;
+                        if (resizeHandleType.includes('left')) {
+                            elementContainer.style.left = `${newLeft}px`;
+                        }
+                        if (resizeHandleType.includes('top')) {
+                            elementContainer.style.top = `${newTop}px`;
+                        }
+
+                        const elementData = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                        if (elementData && elementData.type === 'text') {
+                            const newFontSize = resizeStartFontSize * (newWidth / resizeStartWidth);
+                            if (newFontSize > 10 && newFontSize < 150) {
+                                elementContainer.querySelector('[contenteditable]').style.fontSize = `${newFontSize}px`;
+                            }
+                        }
+                    }
+                } else if (isDragging && activeElementId) {
+                    const slideRect = slideContainer.getBoundingClientRect();
+                    const elementContainer = document.getElementById(activeElementId);
+                    if (!elementContainer) return;
+
+                    const newLeft = e.clientX - slideRect.left - dragOffsetX;
+                    const newTop = e.clientY - slideRect.top - dragOffsetY;
+                    
+                    elementContainer.style.left = `${(newLeft / slideRect.width) * 100}%`;
+                    elementContainer.style.top = `${(newTop / slideRect.height) * 100}%`;
+                    elementContainer.style.transform = 'none';
+                }
+            });
+
+            slideContainer.addEventListener('mouseup', () => {
+                if (isResizing && activeElementId) {
+                    const elementContainer = document.getElementById(activeElementId);
+                    if (!elementContainer) return;
+
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (element) {
+                        const slideRect = elementContainer.parentElement.getBoundingClientRect();
+                        const elementRect = elementContainer.getBoundingClientRect();
+
+                        element.styles.width = `${(elementRect.width / slideRect.width) * 100}%`;
+                        element.styles.height = `${(elementRect.height / slideRect.height) * 100}%`;
+                        element.styles.left = `${((elementRect.left - slideRect.left) / slideRect.width) * 100}%`;
+                        element.styles.top = `${((elementRect.top - slideRect.top) / slideRect.height) * 100}%`;
+
+                        if (element.type === 'text') {
+                            const finalFontSizePx = parseFloat(window.getComputedStyle(elementContainer.querySelector('[contenteditable]')).fontSize);
+                            const baseFontSizePx = parseFloat(window.getComputedStyle(document.documentElement).fontSize);
+                            const finalFontSizeRem = finalFontSizePx / baseFontSizePx;
+                            element.styles.fontSize = `${finalFontSizeRem}rem`;
+                        }
+                    }
+                } else if (isDragging && activeElementId) {
+                    const elementContainer = document.getElementById(activeElementId);
+                    if (!elementContainer) return;
+                    
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (element) {
+                        const slideRect = elementContainer.parentElement.getBoundingClientRect();
+                        const elementRect = elementContainer.getBoundingClientRect();
+
+                        element.styles.left = `${((elementRect.left - slideRect.left) / slideRect.width) * 100}%`;
+                        element.styles.top = `${((elementRect.top - slideRect.top) / slideRect.height) * 100}%`;
+                        element.styles.transform = 'none';
+                    }
+                }
+                isDragging = false;
+                isResizing = false;
+            });
+
+            slideContainer.addEventListener('input', (e) => {
+                if (e.target.dataset.id) {
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === e.target.dataset.id);
+                    if (element) {
+                        element.content = e.target.innerText;
+                    }
+                }
+            });
+        }
+        
+        // メッセージを表示する
+        let messageBox;
+        function showMessage(message, isError = false) {
+            if (!messageBox) {
+                console.error("MessageBox element not found.");
+                return;
+            }
+            messageBox.innerText = message;
+            messageBox.classList.remove('hidden');
+            if (isError) {
+                messageBox.classList.remove('bg-green-500');
+                messageBox.classList.add('bg-red-500');
+            } else {
+                messageBox.classList.remove('bg-red-500');
+                messageBox.classList.add('bg-green-500');
+            }
+            clearTimeout(messageBox.hideTimer);
+            messageBox.hideTimer = setTimeout(() => {
+                messageBox.classList.add('hidden');
+            }, 5000);
+        }
+
+        // ボタンのパネルを出すか隠すか決める
+        function togglePanel(panelId) {
+            const panels = ['content-controls', 'animation-controls', 'slide-controls', 'file-controls'];
+            panels.forEach(id => {
+                const panel = document.getElementById(id);
+                if (panel) {
+                    if (id === panelId) {
+                        panel.classList.toggle('hidden');
+                    } else {
+                        panel.classList.add('hidden');
+                    }
+                }
+            });
+        }
+        
+        // スライド一覧パネルを出すか隠すか決める
+        function toggleSlideListView(visible) {
+            const slideListView = document.getElementById('slide-list-view');
+            if (visible === undefined) {
+                slideListView.classList.toggle('hidden');
+            } else if (visible) {
+                slideListView.classList.remove('hidden');
+            } else {
+                slideListView.classList.add('hidden');
+            }
+
+            if (!slideListView.classList.contains('hidden')) {
+                renderThumbnails();
+            }
+        }
+        
+        // 発表モードを始めるか、やめるか決める
+        function togglePresentationMode(enabled) {
+            isPresentationMode = enabled;
+            const body = document.body;
+            const editorControls = document.getElementById('editor-controls');
+            const presentationView = document.getElementById('presentation-view');
+            const messageBox = document.getElementById('message-box');
+            
+            // 発表を始めるときは、すべてのパネルを非表示にします
+            const panels = ['content-controls', 'animation-controls', 'slide-controls', 'file-controls'];
+            panels.forEach(id => document.getElementById(id).classList.add('hidden'));
+
+            if (enabled) {
+                // 発表モードに切り替える前に、アクティブな要素を非アクティブにする
+                if (document.activeElement) {
+                    document.activeElement.blur();
+                }
+                setActiveElement(null);
+                
+                body.classList.add('overflow-hidden');
+                editorControls.classList.add('hidden');
+                presentationView.classList.remove('hidden');
+                
+                renderSlide('presentation-content');
+                showMessage('おわるときはキーボードのESCボタンをおしてね！');
+            } else {
+                body.classList.remove('overflow-hidden');
+                editorControls.classList.remove('hidden');
+                presentationView.classList.add('hidden');
+                renderSlide('slide-content');
+                messageBox.classList.add('hidden'); // 発表が終わったらメッセージを非表示にします
+            }
+        }
+
+        // えらんだお絵かきを一番前にだす
+        function bringToFront() {
+            if (activeElementId) {
+                const elements = slides[currentSlideIndex].elements;
+                const activeElementIndex = elements.findIndex(el => el.id === activeElementId);
+                if (activeElementIndex !== -1) {
+                    const [element] = elements.splice(activeElementIndex, 1);
+                    elements.push(element);
+                    renderSlide('slide-content');
+                    showMessage('おえかきを前に出したよ！');
+                }
+            } else {
+                showMessage('前に出したいものを、先にえらんでね。', true);
+            }
+        }
+        
+        // えらんだお絵かきを一番後ろにだす
+        function sendToBack() {
+            if (activeElementId) {
+                const elements = slides[currentSlideIndex].elements;
+                const activeElementIndex = elements.findIndex(el => el.id === activeElementId);
+                if (activeElementIndex !== -1) {
+                    const [element] = elements.splice(activeElementIndex, 1);
+                    elements.unshift(element);
+                    renderSlide('slide-content');
+                    showMessage('おえかきを後ろに出したよ！');
+                }
+            } else {
+                showMessage('後ろに出したいものを、先にえらんでね。', true);
+            }
+        }
+        
+        // えらんだお絵かきを消す
+        function deleteElement() {
+            if (activeElementId) {
+                const elements = slides[currentSlideIndex].elements;
+                const activeElementIndex = elements.findIndex(el => el.id === activeElementId);
+                if (activeElementIndex !== -1) {
+                    elements.splice(activeElementIndex, 1);
+                    activeElementId = null;
+                    renderSlide('slide-content');
+                    showMessage('おえかきをけしたよ！');
+                }
+            } else {
+                showMessage('けしたいものを、先にえらんでね。', true);
+            }
+        }
+
+        // キーボードでページをめくる
+        document.addEventListener('keydown', (e) => {
+            if (isPresentationMode) {
+                if (e.key === 'ArrowRight') {
+                    if (currentSlideIndex < slides.length - 1) {
+                        currentSlideIndex++;
+                        renderSlide('presentation-content');
+                    }
+                } else if (e.key === 'ArrowLeft') {
+                    if (currentSlideIndex > 0) {
+                        currentSlideIndex--;
+                        renderSlide('presentation-content');
+                    }
+                } else if (e.key === 'Escape') {
+                    togglePresentationMode(false);
+                }
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            messageBox = document.getElementById('message-box');
+            // スライドの形をテレビみたいにする
+            document.getElementById('slide-container').style.aspectRatio = '16 / 9';
+            const fileInput = document.getElementById('file-input');
+            const loadInput = document.getElementById('load-input');
+            const animationSelect = document.getElementById('animation-select');
+            let fileTypeToUpload = null;
+
+            // メインの操作ボタン
+            document.getElementById('content-button').addEventListener('click', () => togglePanel('content-controls'));
+            document.getElementById('animation-button').addEventListener('click', () => togglePanel('animation-controls'));
+            document.getElementById('slide-button').addEventListener('click', () => togglePanel('slide-controls'));
+            document.getElementById('file-button').addEventListener('click', () => togglePanel('file-controls'));
+            
+            // ファイルそうさ
+            document.getElementById('load-button').addEventListener('click', () => {
+                loadInput.click();
+            });
+
+            loadInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        try {
+                            const loadedSlides = JSON.parse(event.target.result);
+                            slides = loadedSlides;
+                            currentSlideIndex = 0;
+                            renderSlide('slide-content');
+                            showMessage("ファイルをよみこんだよ！");
+                        } catch (error) {
+                            console.error("ファイルの読み込み中にエラーが発生しました:", error);
+                            showMessage("ファイルがこわれてるみたい...", true);
+                        }
+                    };
+                    reader.onerror = (error) => {
+                        console.error("ファイルの読み込み中にエラーが発生しました:", error);
+                        showMessage("ファイルをよみこめなかったよ...", true);
+                    };
+                    reader.readAsText(file);
+                }
+            });
+
+            document.getElementById('save-button').addEventListener('click', () => {
+                const dataStr = JSON.stringify(slides, null, 2);
+                const blob = new Blob([dataStr], {type: 'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'presentation.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showMessage("データを残したよ！");
+            });
+
+            // ページをめくる
+            document.getElementById('prev-button').addEventListener('click', () => {
+                if (currentSlideIndex > 0) {
+                    currentSlideIndex--;
+                    renderSlide('slide-content');
+                }
+            });
+
+            document.getElementById('next-button').addEventListener('click', () => {
+                if (currentSlideIndex < slides.length - 1) {
+                    currentSlideIndex++;
+                    renderSlide('slide-content');
+                }
+            });
+
+            // ページをそうさ
+            document.getElementById('add-slide-button').addEventListener('click', () => {
+                const newSlide = { elements: [{ id: crypto.randomUUID(), type: 'text', content: '新しいページだよ！', styles: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '3rem', fontWeight: 'bold' }, animation: null }] };
+                slides.splice(currentSlideIndex + 1, 0, newSlide);
+                currentSlideIndex++;
+                renderSlide('slide-content');
+            });
+
+            document.getElementById('delete-slide-button').addEventListener('click', () => {
+                if (slides.length > 1) {
+                    slides.splice(currentSlideIndex, 1);
+                    if (currentSlideIndex >= slides.length) {
+                        currentSlideIndex = slides.length - 1;
+                    }
+                    renderSlide('slide-content');
+                } else {
+                    showMessage("このページは大事だから消せないよ。", true);
+                }
+            });
+
+            // スライド一覧を表示するボタン
+            document.getElementById('show-slides-button').addEventListener('click', () => {
+                toggleSlideListView(true);
+            });
+            
+            // スライド一覧パネルの閉じるボタン
+            document.getElementById('close-slides-button').addEventListener('click', () => {
+                toggleSlideListView(false);
+            });
+
+
+            // コンテンツを入れる
+            document.getElementById('add-text-button').addEventListener('click', () => {
+                const newElement = { id: crypto.randomUUID(), type: 'text', content: '新しい文字', styles: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '1.5rem', fontWeight: 'normal' }, animation: null };
+                slides[currentSlideIndex].elements.push(newElement);
+                renderSlide('slide-content');
+            });
+            
+            document.getElementById('add-image-button').addEventListener('click', () => {
+                fileTypeToUpload = 'image';
+                fileInput.accept = 'image/*';
+                fileInput.click();
+            });
+            
+            document.getElementById('add-video-button').addEventListener('click', () => {
+                fileTypeToUpload = 'video';
+                fileInput.accept = 'video/*';
+                fileInput.click();
+            });
+
+            fileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    // アップロード上限を10MBに設定
+                    const maxFileSize = 10 * 1024 * 1024;
+                    if (file.size > maxFileSize) { 
+                         showMessage("ファイルが大きすぎるよ（10MBまで）！", true);
+                         return;
+                    }
+                    try {
+                        showMessage("ファイルをじゅんびしているよ...");
+                        const base64Data = await convertFileToBase64(file);
+                        
+                        const newElement = {
+                            id: crypto.randomUUID(),
+                            type: fileTypeToUpload,
+                            src: base64Data,
+                            styles: { top: '20%', left: '20%', width: '40%', height: 'auto' },
+                            animation: null
+                        };
+                        slides[currentSlideIndex].elements.push(newElement);
+                        renderSlide('slide-content');
+                        showMessage("ファイルを入れたよ！");
+
+                    } catch (error) {
+                        console.error("ファイルの処理中にエラーが発生しました:", error);
+                        showMessage("ファイルの追加に失敗したよ...", true);
+                    }
+                }
+            });
+            
+            
+            // 文字の装飾
+            document.getElementById('bold-button').addEventListener('click', () => {
+                if (activeElementId) {
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (element && element.type === 'text') {
+                        if (element.styles.fontWeight === 'bold') {
+                            element.styles.fontWeight = 'normal';
+                        } else {
+                            element.styles.fontWeight = 'bold';
+                        }
+                        const activeEl = document.getElementById(activeElementId).querySelector('[contenteditable]');
+                        if (activeEl) {
+                           activeEl.style.fontWeight = element.styles.fontWeight;
+                        }
+                    }
+                }
+            });
+            
+            document.getElementById('color-picker').addEventListener('change', (e) => {
+                if (activeElementId) {
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (element && element.type === 'text') {
+                        element.styles.color = e.target.value;
+                        const activeEl = document.getElementById(activeElementId).querySelector('[contenteditable]');
+                        if (activeEl) {
+                           activeEl.style.color = e.target.value;
+                        }
+                    }
+                }
+            });
+            
+            // アニメーション設定
+            animationSelect.addEventListener('change', (e) => {
+                if (activeElementId) {
+                    const element = slides[currentSlideIndex].elements.find(el => el.id === activeElementId);
+                    if (element) {
+                        const animationValue = e.target.value;
+                        element.animation = animationValue === 'none' ? null : animationValue;
+                        showMessage(animationValue === 'none' ? 'うごきを消したよ。' : 'うごきをつけたよ！');
+                        renderSlide('slide-content'); // アニメーションラベルを表示するために再描画します
+                    }
+                } else {
+                    showMessage("うごきをつけるには、先にえらんでね。", true);
+                }
+            });
+
+            // 重なりの調整
+            document.getElementById('bring-to-front-button').addEventListener('click', bringToFront);
+            document.getElementById('send-to-back-button').addEventListener('click', sendToBack);
+
+            // 削除
+            document.getElementById('delete-element-button').addEventListener('click', deleteElement);
+
+            // 発表モード
+            document.getElementById('present-button').addEventListener('click', () => {
+                togglePresentationMode(true);
+            });
+
+            renderSlide('slide-content');
+        });
+    </script>
+</head>
+<body class="bg-gray-100 font-sans">
+
+    <div id="message-box" class="fixed top-4 left-1/2 transform -translate-x-1/2 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg hidden z-50">メッセージ</div>
+    <input type="file" id="file-input" class="hidden">
+    <input type="file" id="load-input" class="hidden" accept="application/json">
+
+    <!-- メインコンテンツエリア。操作パネルと重なる部分。 -->
+    <div class="flex flex-col items-center justify-center min-h-screen p-4 pl-80">
+        <!-- スライドナビゲーション -->
+        <div class="flex items-center justify-between w-full max-w-5xl">
+            <button id="prev-button" class="bg-blue-500 text-white px-6 py-3 rounded-full hover:bg-blue-600 transition duration-300 shadow-lg">
+                <span class="text-2xl">←</span> 前
+            </button>
+            <span id="slide-count" class="text-gray-600 font-bold text-lg"></span>
+            <button id="next-button" class="bg-blue-500 text-white px-6 py-3 rounded-full hover:bg-blue-600 transition duration-300 shadow-lg">
+                次へ <span class="text-2xl">→</span>
+            </button>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-5xl overflow-hidden mt-4 relative">
+            <div class="relative w-full aspect-video flex items-center justify-center bg-white" id="slide-container">
+                <div id="slide-content" class="w-full h-full relative">
+                    <!-- スライドのコンテンツはここに動的に入ります -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- コントロールパネル -->
+    <div id="editor-controls" class="fixed top-1/2 left-4 transform -translate-y-1/2 flex p-4 bg-white rounded-2xl shadow-xl gap-4 z-20">
+        <!-- メインの操作ボタン -->
+        <div class="flex-none w-40 flex flex-col items-center gap-4">
+            <h2 class="font-bold text-xl mb-2">そうさパネル</h2>
+            <button id="content-button" class="bg-blue-500 text-white px-6 py-3 rounded-full hover:bg-blue-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                <span class="text-2xl">✍️</span> つくる
+            </button>
+            <button id="animation-button" class="bg-red-500 text-white px-6 py-3 rounded-full hover:bg-red-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                <span class="text-2xl">🎬</span> うごかす
+            </button>
+            <button id="slide-button" class="bg-yellow-500 text-white px-6 py-3 rounded-full hover:bg-yellow-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                <span class="text-2xl">📄</span> ページをそうさ
+            </button>
+            <button id="file-button" class="bg-indigo-500 text-white px-6 py-3 rounded-full hover:bg-indigo-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                <span class="text-2xl">💾</span> ファイルをそうさ
+            </button>
+        </div>
+        
+        <!-- コンテンツ編集パネル (デフォルトは非表示) -->
+        <div class="flex-1 flex flex-col items-center justify-center pl-4 border-l border-gray-300">
+            <div id="content-controls" class="hidden w-full flex flex-col items-center justify-center gap-4">
+                <button id="add-text-button" class="bg-blue-500 text-white px-6 py-3 rounded-full hover:bg-blue-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">📝</span> 文字を入れる
+                </button>
+                <button id="add-image-button" class="bg-purple-500 text-white px-6 py-3 rounded-full hover:bg-purple-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">🖼️</span> 写真を入れる
+                </button>
+                <button id="add-video-button" class="bg-teal-500 text-white px-6 py-3 rounded-full hover:bg-teal-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">📹</span> どうがをいれる
+                </button>
+                <button id="delete-element-button" class="bg-gray-400 text-white px-6 py-3 rounded-full hover:bg-gray-500 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">❌</span> えらんだものをけす
+                </button>
+                <button id="bold-button" class="bg-yellow-500 text-white px-6 py-3 rounded-full hover:bg-yellow-600 transition duration-300 shadow-lg font-bold w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">🅱️</span> 太くする
+                </button>
+                <div class="flex flex-col items-center gap-2">
+                    <span class="text-gray-600">色を選ぶ:</span>
+                    <input type="color" id="color-picker" class="rounded-full w-12 h-12 border-none p-1 shadow-lg cursor-pointer">
+                </div>
+                <button id="bring-to-front-button" class="bg-red-500 text-white px-6 py-3 rounded-full hover:bg-red-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">⬆️</span> 前に出す
+                </button>
+                <button id="send-to-back-button" class="bg-red-500 text-white px-6 py-3 rounded-full hover:bg-red-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">⬇️</span> 後ろに出す
+                </button>
+            </div>
+
+            <!-- アニメーションパネル (デフォルトは非表示) -->
+            <div id="animation-controls" class="hidden w-full flex flex-col items-center justify-center gap-4">
+                <label for="animation-select" class="text-gray-600">うごき:</label>
+                <select id="animation-select" class="p-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200 w-full">
+                    <option value="none">なし</option>
+                    <option value="fadeIn">ぼんやり出てくる</option>
+                    <option value="slideInLeft">左から出てくる</option>
+                    <option value="scaleIn">大きくする</option>
+                </select>
+            </div>
+
+            <!-- スライド管理パネル (デフォルトは非表示) -->
+            <div id="slide-controls" class="hidden w-full flex flex-col items-center justify-center gap-4">
+                <button id="add-slide-button" class="bg-green-500 text-white px-6 py-3 rounded-full hover:bg-green-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">➕</span> 新しいページを作る
+                </button>
+                <button id="delete-slide-button" class="bg-red-500 text-white px-6 py-3 rounded-full hover:bg-red-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">🗑️</span> このページを消す
+                </button>
+                <button id="show-slides-button" class="bg-sky-500 text-white px-6 py-3 rounded-full hover:bg-sky-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">📑</span> スライド一覧
+                </button>
+            </div>
+            
+            <!-- ファイル管理パネル (デフォルトは非表示) -->
+            <div id="file-controls" class="hidden w-full flex flex-col items-center justify-center gap-4">
+                <button id="save-button" class="bg-indigo-500 text-white px-6 py-3 rounded-full hover:bg-indigo-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">💾</span> データを残す
+                </button>
+                <button id="load-button" class="bg-gray-500 text-white px-6 py-3 rounded-full hover:bg-gray-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">📂</span> データを読み込む
+                </button>
+                <button id="present-button" class="bg-sky-500 text-white px-6 py-3 rounded-full hover:bg-sky-600 transition duration-300 shadow-lg w-full flex items-center justify-center gap-2">
+                    <span class="text-2xl">▶️</span> 発表を始める
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- スライド一覧ビュー -->
+    <div id="slide-list-view" class="fixed inset-0 bg-gray-900 bg-opacity-90 z-40 hidden flex flex-col items-center p-8">
+        <div class="flex justify-between w-full max-w-5xl mb-4">
+            <h2 class="text-white text-3xl font-bold">スライド一覧</h2>
+            <button id="close-slides-button" class="text-white text-3xl hover:text-gray-400 transition duration-300">
+                &times;
+            </button>
+        </div>
+        <div id="slide-list-thumbnails" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 w-full max-w-5xl overflow-y-auto">
+            <!-- スライドのサムネイルはここに動的に入ります -->
+        </div>
+    </div>
+
+    <!-- 発表ビュー -->
+    <div id="presentation-view" class="fixed inset-0 bg-white hidden">
+        <div id="presentation-content" class="w-full h-full relative"></div>
+    </div>
+</body>
+</html>
